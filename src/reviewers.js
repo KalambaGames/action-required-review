@@ -1,19 +1,19 @@
-const core = require( '@actions/core' );
-const github = require( '@actions/github' );
-const { WError } = require( 'error' );
+import * as core from '@actions/core';
+import * as github from '@actions/github';
+import { WError } from 'error';
 
 /**
  * Fetch the reviewers approving the current PR.
  *
- * @returns {string[]} Reviewers.
+ * @return {string[]} Reviewers.
  */
-async function fetchReviewers() {
+export async function fetchReviewers() {
 	const octokit = github.getOctokit( core.getInput( 'token', { required: true } ) );
 	const owner = github.context.payload.repository.owner.login;
 	const repo = github.context.payload.repository.name;
 	const pr = github.context.payload.pull_request.number;
 
-	const reviewers = {};
+	const reviewers = new Set();
 	try {
 		for await ( const res of octokit.paginate.iterator( octokit.rest.pulls.listReviews, {
 			owner: owner,
@@ -22,8 +22,12 @@ async function fetchReviewers() {
 			per_page: 100,
 		} ) ) {
 			res.data.forEach( review => {
+				// GitHub may return more than one review per user, but only counts the last non-comment one for each.
+				// "APPROVED" allows merging, while "CHANGES_REQUESTED" and "DISMISSED" do not.
 				if ( review.state === 'APPROVED' ) {
-					reviewers[ review.user.login ] = true;
+					reviewers.add( review.user.login );
+				} else if ( review.state !== 'COMMENTED' ) {
+					reviewers.delete( review.user.login );
 				}
 			} );
 		}
@@ -35,7 +39,5 @@ async function fetchReviewers() {
 		);
 	}
 
-	return Object.keys( reviewers ).sort();
+	return [ ...reviewers ].sort();
 }
-
-module.exports = fetchReviewers;

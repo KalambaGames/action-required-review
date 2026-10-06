@@ -1,41 +1,68 @@
-const assert = require( 'assert' );
-const core = require( '@actions/core' );
-const { SError } = require( 'error' );
-const picomatch = require( 'picomatch' );
-
-const fetchTeamMembers = require( './team-members.js' );
+import assert from 'assert';
+import * as core from '@actions/core';
+import * as github from '@actions/github';
+import { SError } from 'error';
+import picomatch from 'picomatch';
+import { fetchTeamMembers } from './team-members.js';
 
 class RequirementError extends SError {}
 
 /**
  * Prints a result set, then returns it.
  *
- * @param {string} label - Label for the set.
- * @param {string[]} items - Items to print. If an empty array, will print `<empty set>` instead.
- * @returns {string[]} `items`.
+ * @param {string}   label         - Label for the set.
+ * @param {string[]} teamReviewers - Team members that have reviewed the file. If an empty array, will print `<empty set>` instead.
+ * @param {string[]} neededTeams   - Teams that have no reviews from it's members.
+ * @return {{teamReviewers, neededTeams}} `{teamReviewers, neededTeams}`.
  */
-function printSet( label, items ) {
-	core.info( label + ' ' + ( items.length ? items.join( ', ' ) : '<empty set>' ) );
-	return items;
+function printSet( label, teamReviewers, neededTeams ) {
+	core.info( label + ' ' + ( teamReviewers.length ? teamReviewers.join( ', ' ) : '<empty set>' ) );
+	return { teamReviewers, neededTeams };
 }
 
 /**
  * Build a reviewer team membership filter.
  *
- * @param {object} config - Requirements configuration object being processed.
+ * @param {object}              config     - Requirements configuration object being processed.
  * @param {Array|string|object} teamConfig - Team name, or single-key object with a list of teams/objects, or array of such.
- * @param {string} indent - String for indentation.
- * @returns {Function} Function to filter an array of reviewers by membership in the team(s).
+ * @param {string}              indent     - String for indentation.
+ * @return {Function} Function to filter an array of reviewers by membership in the team(s).
  */
 function buildReviewerFilter( config, teamConfig, indent ) {
 	if ( typeof teamConfig === 'string' ) {
 		const team = teamConfig;
 		return async function ( reviewers ) {
 			const members = await fetchTeamMembers( team );
-			return printSet(
-				`${ indent }Members of ${ team }:`,
-				reviewers.filter( reviewer => members.includes( reviewer ) )
+			const teamReviewers = reviewers.filter( reviewer => members.includes( reviewer ) );
+			const neededTeams = teamReviewers.length ? [] : [ team ];
+			return printSet( `${ indent }Members of ${ team }:`, teamReviewers, neededTeams );
+		};
+	}
+
+	if ( teamConfig !== null && typeof teamConfig === 'object' && 'team' in teamConfig ) {
+		const { team, min = 1, ...rest } = teamConfig;
+		if ( typeof team !== 'string' || ! Number.isInteger( min ) || min < 1 ) {
+			throw new RequirementError( 'Expected `team` to be a string and `min` a positive integer.', {
+				config: config,
+				value: teamConfig,
+			} );
+		}
+		if ( Object.keys( rest ).length !== 0 ) {
+			throw new RequirementError( 'Expected only `team` and `min` keys.', {
+				config: config,
+				value: teamConfig,
+			} );
+		}
+		return async function ( reviewers ) {
+			const members = await fetchTeamMembers( team );
+			const teamReviewers = reviewers.filter( reviewer => members.includes( reviewer ) );
+			core.info(
+				`${ indent }Members of ${ team } (${ teamReviewers.length } of ${ min } required): ` +
+					( teamReviewers.length ? teamReviewers.join( ', ' ) : '<empty set>' )
 			);
+			return teamReviewers.length >= min
+				? { teamReviewers, neededTeams: [] }
+				: { teamReviewers: [], neededTeams: [ team ] };
 		};
 	}
 
@@ -53,9 +80,11 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 	const op = keys[ 0 ];
 	let arg = teamConfig[ op ];
 
+	// Shared validation.
 	switch ( op ) {
 		case 'any-of':
 		case 'all-of':
+		case 'is-author-or-reviewer':
 			// These ops require an array of teams/objects.
 			if ( ! Array.isArray( arg ) ) {
 				throw new RequirementError( `Expected an array of teams, got ${ typeof arg }`, {
@@ -63,7 +92,7 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 					value: arg,
 				} );
 			}
-			if ( ! arg.length === 0 ) {
+			if ( arg.length === 0 ) {
 				throw new RequirementError( 'Expected a non-empty array of teams', {
 					config: config,
 					value: teamConfig,
@@ -71,37 +100,86 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 			}
 			arg = arg.map( t => buildReviewerFilter( config, t, `${ indent }  ` ) );
 			break;
-
-		default:
-			throw new RequirementError( `Unrecognized operation "${ op }"`, {
-				config: config,
-				value: teamConfig,
-			} );
 	}
 
+	// Process operations.
 	if ( op === 'any-of' ) {
 		return async function ( reviewers ) {
 			core.info( `${ indent }Union of these:` );
-			return printSet( `${ indent }=>`, [
-				...new Set(
-					( await Promise.all( arg.map( f => f( reviewers, `${ indent }  ` ) ) ) ).flat( 1 )
-				),
-			] );
+			const reviewersAny = await Promise.all( arg.map( f => f( reviewers, `${ indent }  ` ) ) );
+			const requirementsMet = [];
+			const neededTeams = [];
+			for ( const requirementResult of reviewersAny ) {
+				if ( requirementResult.teamReviewers.length !== 0 ) {
+					requirementsMet.push( requirementResult.teamReviewers );
+				}
+				if ( requirementResult.neededTeams.length !== 0 ) {
+					neededTeams.push( requirementResult.neededTeams );
+				}
+			}
+			if ( requirementsMet.length > 0 ) {
+				// If there are requirements met, zero out the needed teams
+				neededTeams.length = 0;
+			}
+			return printSet(
+				`${ indent }=>`,
+				[ ...new Set( requirementsMet.flat( 1 ) ) ],
+				[ ...new Set( neededTeams.flat( 1 ) ) ]
+			);
 		};
 	}
 
 	if ( op === 'all-of' ) {
 		return async function ( reviewers ) {
 			core.info( `${ indent }Union of these, if none are empty:` );
-			const filtered = await Promise.all( arg.map( f => f( reviewers, `${ indent }  ` ) ) );
-			if ( filtered.some( a => a.length === 0 ) ) {
-				return printSet( `${ indent }=>`, [] );
+			const reviewersAll = await Promise.all( arg.map( f => f( reviewers, `${ indent }  ` ) ) );
+			const requirementsMet = [];
+			const neededTeams = [];
+			for ( const requirementResult of reviewersAll ) {
+				if ( requirementResult.teamReviewers.length !== 0 ) {
+					requirementsMet.push( requirementResult.teamReviewers );
+				}
+				if ( requirementResult.neededTeams.length !== 0 ) {
+					neededTeams.push( requirementResult.neededTeams );
+				}
 			}
-			return printSet( `${ indent }=>`, [ ...new Set( filtered.flat( 1 ) ) ] );
+			if ( neededTeams.length !== 0 ) {
+				// If there are needed teams, zero out requirements met
+				return printSet( `${ indent }=>`, [], [ ...new Set( neededTeams.flat( 1 ) ) ] );
+			}
+			return printSet( `${ indent }=>`, [ ...new Set( requirementsMet.flat( 1 ) ) ], [] );
 		};
 	}
 
-	// WTF?
+	if ( op === 'is-author-or-reviewer' ) {
+		return async function ( reviewers ) {
+			core.info( `${ indent }Author or reviewers are union of these:` );
+			const authorOrReviewers = [ ...reviewers, github.context.payload.pull_request.user.login ];
+			const reviewersAny = await Promise.all(
+				arg.map( f => f( authorOrReviewers, `${ indent }  ` ) )
+			);
+			const requirementsMet = [];
+			const neededTeams = [];
+			for ( const requirementResult of reviewersAny ) {
+				if ( requirementResult.teamReviewers.length !== 0 ) {
+					requirementsMet.push( requirementResult.teamReviewers );
+				}
+				if ( requirementResult.neededTeams.length !== 0 ) {
+					neededTeams.push( requirementResult.neededTeams );
+				}
+			}
+			if ( requirementsMet.length > 0 ) {
+				// If there are requirements met, zero out the needed teams
+				neededTeams.length = 0;
+			}
+			return printSet(
+				`${ indent }=>`,
+				[ ...new Set( requirementsMet.flat( 1 ) ) ],
+				[ ...new Set( neededTeams.flat( 1 ) ) ]
+			);
+		};
+	}
+
 	throw new RequirementError( `Unrecognized operation "${ op }"`, {
 		config: config,
 		value: teamConfig,
@@ -111,13 +189,14 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 /**
  * Class representing an individual requirement.
  */
-class Requirement {
+export class Requirement {
 	/**
 	 * Constructor.
 	 *
-	 * @param {object} config - Object config
-	 * @param {string[]|string} config.paths - Paths this requirement applies to. Either an array of picomatch globs, or the string "unmatched".
-	 * @param {Array} config.teams - Team reviews requirements.
+	 * @param {object}          config         - Object config
+	 * @param {string[]|string} config.paths   - Paths this requirement applies to. Either an array of picomatch globs, or the string "unmatched".
+	 * @param {Array}           config.teams   - Team reviews requirements.
+	 * @param {boolean}         config.consume - Whether matched paths should be ignored by later rules.
 	 */
 	constructor( config ) {
 		this.name = config.name || 'Unnamed requirement';
@@ -164,14 +243,19 @@ class Requirement {
 		}
 
 		this.reviewerFilter = buildReviewerFilter( config, { 'any-of': config.teams }, '  ' );
+		this.consume = !! config.consume;
 	}
 
+	// eslint-disable-next-line jsdoc/require-returns, jsdoc/require-returns-check -- Doesn't support documentation of object structure.
 	/**
 	 * Test whether this requirement applies to the passed paths.
 	 *
-	 * @param {string[]} paths - Paths to test against.
-	 * @param {string[]} matchedPaths - Paths that have already been matched. Will be modified if true is returned.
-	 * @returns {boolean} Whether the requirement applies.
+	 * @param {string[]} paths        - Paths to test against.
+	 * @param {string[]} matchedPaths - Paths that have already been matched.
+	 * @return {object} _ Results object.
+	 * @return {boolean} _.applies Whether the requirement applies.
+	 * @return {string[]} _.matchedPaths New value for `matchedPaths`.
+	 * @return {string[]} _.paths New value for `paths`.
 	 */
 	appliesToPaths( paths, matchedPaths ) {
 		let matches;
@@ -184,26 +268,35 @@ class Requirement {
 			}
 		}
 
-		if ( matches.length !== 0 ) {
+		const ret = {
+			applies: matches.length !== 0,
+			matchedPaths,
+			paths,
+		};
+
+		if ( ret.applies ) {
 			core.info( 'Matches the following files:' );
 			matches.forEach( m => core.info( `   - ${ m }` ) );
-			matchedPaths.push( ...matches.filter( p => ! matchedPaths.includes( p ) ) );
-			matchedPaths.sort();
+			ret.matchedPaths = [ ...new Set( [ ...matchedPaths, ...matches ] ) ].sort();
+
+			if ( this.consume ) {
+				core.info( 'Consuming matched files!' );
+				ret.paths = ret.paths.filter( p => ! matches.includes( p ) );
+			}
 		}
 
-		return matches.length !== 0;
+		return ret;
 	}
 
 	/**
 	 * Test whether this requirement is satisfied.
 	 *
 	 * @param {string[]} reviewers - Reviewers to test against.
-	 * @returns {boolean} Whether the requirement is satisfied.
+	 * @return {string[]} Array of teams from which review is still needed.
 	 */
-	async isSatisfied( reviewers ) {
+	async needsReviewsFrom( reviewers ) {
 		core.info( 'Checking reviewers...' );
-		return ( await this.reviewerFilter( reviewers ) ).length > 0;
+		const checkNeededTeams = await this.reviewerFilter( reviewers );
+		return checkNeededTeams.neededTeams;
 	}
 }
-
-module.exports = Requirement;

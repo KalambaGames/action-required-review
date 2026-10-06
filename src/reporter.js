@@ -1,19 +1,19 @@
-const core = require( '@actions/core' );
-const github = require( '@actions/github' );
-const { WError } = require( 'error' );
+import * as core from '@actions/core';
+import * as github from '@actions/github';
+import { WError } from 'error';
 
-const STATE_ERROR = 'error';
-const STATE_FAILURE = 'failure';
-const STATE_PENDING = 'pending';
-const STATE_SUCCESS = 'success';
+export const STATE_ERROR = 'error';
+export const STATE_FAILURE = 'failure';
+export const STATE_PENDING = 'pending';
+export const STATE_SUCCESS = 'success';
 
 /**
  * Report a status check to GitHub.
  *
- * @param {string} state - One of the `STATE_*` constants.
+ * @param {string} state       - One of the `STATE_*` constants.
  * @param {string} description - Description for the status.
  */
-async function status( state, description ) {
+export async function status( state, description ) {
 	const octokit = github.getOctokit( core.getInput( 'token', { required: true } ) );
 	const owner = github.context.payload.repository.owner.login;
 	const repo = github.context.payload.repository.name;
@@ -22,7 +22,7 @@ async function status( state, description ) {
 		repo: repo,
 		sha: github.context.payload.pull_request.head.sha,
 		state: state,
-		target_url: `https://github.com/${ owner }/${ repo }/actions/runs/${ github.context.runId }`,
+		target_url: `${ github.context.serverUrl }/${ owner }/${ repo }/actions/runs/${ github.context.runId }`,
 		description: description,
 		context: core.getInput( 'status', { required: true } ),
 	};
@@ -43,14 +43,4 @@ async function status( state, description ) {
  * throw ReportError.create( 'Status description', originalError );
  * ```
  */
-class ReportError extends WError {}
-
-module.exports = {
-	STATE_ERROR: STATE_ERROR,
-	STATE_FAILURE: STATE_FAILURE,
-	STATE_PENDING: STATE_PENDING,
-	STATE_SUCCESS: STATE_SUCCESS,
-	status: status,
-	ReportError: ReportError,
-};
-module.exports.default = module.exports;
+export class ReportError extends WError {}

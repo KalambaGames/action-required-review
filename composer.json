@@ -5,17 +5,20 @@
 	"license": "GPL-2.0-or-later",
 	"require": {},
 	"require-dev": {
-		"automattic/jetpack-changelogger": "3.0.x-dev"
+		"automattic/jetpack-changelogger": "^6.0.14"
 	},
 	"scripts": {
 		"build-development": [
 			"pnpm run build"
-		]
+		],
+		"test-coverage": "pnpm run test-coverage",
+		"test-js": "pnpm run test"
 	},
 	"extra": {
 		"autotagger": {
 			"major": true
 		},
+		"autorelease": true,
 		"mirror-repo": "Automattic/action-required-review",
 		"changelogger": {
 			"link-template": "https://github.com/Automattic/action-required-review/compare/v${old}...v${new}"
