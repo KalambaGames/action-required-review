@@ -39,6 +39,33 @@ function buildReviewerFilter( config, teamConfig, indent ) {
 		};
 	}
 
+	if ( teamConfig !== null && typeof teamConfig === 'object' && 'team' in teamConfig ) {
+		const { team, min = 1, ...rest } = teamConfig;
+		if ( typeof team !== 'string' || ! Number.isInteger( min ) || min < 1 ) {
+			throw new RequirementError( 'Expected `team` to be a string and `min` a positive integer.', {
+				config: config,
+				value: teamConfig,
+			} );
+		}
+		if ( Object.keys( rest ).length !== 0 ) {
+			throw new RequirementError( 'Expected only `team` and `min` keys.', {
+				config: config,
+				value: teamConfig,
+			} );
+		}
+		return async function ( reviewers ) {
+			const members = await fetchTeamMembers( team );
+			const teamReviewers = reviewers.filter( reviewer => members.includes( reviewer ) );
+			core.info(
+				`${ indent }Members of ${ team } (${ teamReviewers.length } of ${ min } required): ` +
+					( teamReviewers.length ? teamReviewers.join( ', ' ) : '<empty set>' )
+			);
+			return teamReviewers.length >= min
+				? { teamReviewers, neededTeams: [] }
+				: { teamReviewers: [], neededTeams: [ team ] };
+		};
+	}
+
 	let keys;
 	try {
 		keys = Object.keys( teamConfig );

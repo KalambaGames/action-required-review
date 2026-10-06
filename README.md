@@ -152,6 +152,10 @@ The requirements consist of an array of requirement objects. A requirement objec
   Additionally, you can specify a single user by prefixing their username with `@`. For example,
   `@example` will be treated as a virtual team with one member; `example`.
 
+  To require more than one review from the same team, use an object with the keys `team` and
+  `min`. For example, `{ team: developers, min: 2 }` requires reviews from two members of
+  `developers`. It can be used anywhere a team name can.
+
 Paths are matched using the [picomatch](https://www.npmjs.com/package/picomatch#globbing-features) library.
 
 Every requirement object that applies must have appropriate reviews, it's not "first match". Thus,
